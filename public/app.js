@@ -1,6 +1,5 @@
 const state = {
   settings: null,
-  devices: [],
   currentVideo: null,
   cues: [], // { scent: 0-3, time: seconds, duration: seconds }
   selectedCue: null,
@@ -33,6 +32,16 @@ function fmtTime(s) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
+}
+
 // ---------- tabs ----------
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -47,7 +56,6 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 async function loadSettings() {
   const s = await api("/api/settings");
   state.settings = s;
-  document.getElementById("deviceId").value = s.deviceId || "";
   renderScentSettings(s.scents);
   renderScentButtons(s.scents);
   updateStatus(s.loggedIn, s.region);
@@ -67,14 +75,17 @@ function updateStatus(loggedIn, region) {
 }
 
 document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
-  const deviceId = document.getElementById("deviceId").value.trim();
   const scents = collectScentSettings();
+  if (scents.some((scent) => !scent.deviceId.trim())) {
+    toast("Enter a device ID for each device before saving");
+    return;
+  }
   try {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ deviceId, scents }) });
-    state.settings.deviceId = deviceId;
-    state.settings.scents = scents;
+    const { config } = await api("/api/settings", { method: "POST", body: JSON.stringify({ scents }) });
+    state.settings.scents = config.scents;
     toast("Settings saved");
-    renderScentButtons(scents);
+    renderScentSettings(config.scents);
+    renderScentButtons(config.scents);
   } catch (err) {
     toast("Couldn't save: " + err.message);
   }
@@ -90,19 +101,6 @@ document.getElementById("logoutBtn").addEventListener("click", async () => {
   toast("Disconnected from eWeLink");
 });
 
-document.getElementById("fetchDevicesBtn").addEventListener("click", async () => {
-  const hint = document.getElementById("deviceFetchHint");
-  hint.textContent = "Fetching…";
-  try {
-    const { devices } = await api("/api/devices");
-    state.devices = devices;
-    hint.textContent = `Found ${devices.length} device${devices.length === 1 ? "" : "s"} — pick one per scent below.`;
-    renderScentSettings(state.settings.scents);
-  } catch (err) {
-    hint.textContent = "Couldn't fetch: " + err.message;
-  }
-});
-
 // ---------- scent settings (settings tab) ----------
 function renderScentSettings(scents) {
   const wrap = document.getElementById("scentSettingsList");
@@ -110,34 +108,41 @@ function renderScentSettings(scents) {
   scents.forEach((scent, i) => {
     const row = document.createElement("div");
     row.className = "scent-setting";
-    const deviceOptions = state.devices.length
-      ? state.devices.map((d) => `<option value="${d.id}" ${d.id === scent.deviceId ? "selected" : ""}>${d.name} (${d.id.slice(-5)})</option>`).join("")
-      : "";
     row.innerHTML = `
-      <input type="color" value="${scent.color}" data-field="color" />
+      <input type="color" value="${escapeHtml(scent.color)}" data-field="color" />
       <label>Name
-        <input type="text" value="${scent.name}" data-field="name" />
+        <input type="text" value="${escapeHtml(scent.name)}" data-field="name" />
       </label>
       <label>Device
-        ${deviceOptions
-          ? `<select data-field="deviceId">${deviceOptions}</select>`
-          : `<input type="text" value="${scent.deviceId}" data-field="deviceId" placeholder="device ID" />`}
+        <input type="text" value="${escapeHtml(scent.deviceId)}" data-field="deviceId" placeholder="Enter known device ID" />
       </label>
-      <button type="button" class="delete-scent-btn" data-delete-scent="${i}" aria-label="Delete ${scent.name}">Delete</button>
+      <button type="button" class="delete-scent-btn" data-delete-scent="${i}" aria-label="Delete ${escapeHtml(scent.name)}">Delete</button>
       <div class="field-row">
         <label>Outlet (0-3 for a 4-ch relay)
-          <input type="number" min="0" max="3" value="${scent.outlet}" data-field="outlet" />
+          <input type="number" min="0" max="3" value="${escapeHtml(scent.outlet)}" data-field="outlet" />
         </label>
         <label>Pulse (ms)
-          <input type="number" min="200" step="100" value="${scent.pulseMs}" data-field="pulseMs" />
+          <input type="number" min="200" step="100" value="${escapeHtml(scent.pulseMs)}" data-field="pulseMs" />
         </label>
-        <div></div>
       </div>
     `;
     row.dataset.index = i;
     wrap.appendChild(row);
   });
 }
+
+document.getElementById("addScentBtn").addEventListener("click", () => {
+  const scents = collectScentSettings();
+  const colors = ["#a8d5ba", "#bcdfc0", "#cfe8cd", "#e2f0da"];
+  scents.push({
+    name: `Device ${scents.length + 1}`,
+    color: colors[scents.length % colors.length],
+    deviceId: "",
+    outlet: 0,
+    pulseMs: 3000,
+  });
+  renderScentSettings(scents);
+});
 
 document.getElementById("scentSettingsList").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-delete-scent]");
@@ -149,19 +154,13 @@ async function deleteScent(index) {
   const scents = collectScentSettings();
   const scent = scents[index];
   if (!scent) return;
-  if (scents.length === 1) {
-    toast("Keep at least one scent");
-    return;
-  }
   if (!window.confirm(`Delete "${scent.name}"? Its timeline cues will also be removed.`)) return;
 
   try {
-    const { config } = await api(`/api/settings/scents/${index}`, {
-      method: "DELETE",
-      body: JSON.stringify({
-        deviceId: document.getElementById("deviceId").value.trim(),
-        scents,
-      }),
+    scents.splice(index, 1);
+    const { config } = await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ scents, removedScentIndex: index }),
     });
     const selectedCue = state.selectedCue === null ? null : state.cues[state.selectedCue];
     const selectedCueDeleted = selectedCue?.scent === index;
@@ -177,9 +176,9 @@ async function deleteScent(index) {
     renderScentSettings(config.scents);
     renderScentButtons(config.scents);
     renderTracks();
-    toast("Scent deleted");
+    toast("Device deleted");
   } catch (err) {
-    toast("Couldn't delete scent: " + err.message);
+    toast("Couldn't delete device: " + err.message);
   }
 }
 
@@ -201,17 +200,22 @@ function collectScentSettings() {
 function renderScentButtons(scents) {
   const grid = document.getElementById("scentGrid");
   grid.innerHTML = "";
+  if (!scents.length) {
+    grid.textContent = "No devices added yet. Add a device ID in Settings to get started.";
+    return;
+  }
   scents.forEach((scent, i) => {
     const btn = document.createElement("button");
     btn.className = "scent-btn";
     btn.style.setProperty("--dot-color", scent.color);
-    btn.innerHTML = `<div class="dot" style="background:${scent.color}"></div>
-      <div class="label">${scent.name}</div>
+    btn.innerHTML = `<div class="dot"></div>
+      <div class="label">${escapeHtml(scent.name)}</div>
       <div class="sub">${(scent.pulseMs / 1000).toFixed(1)}s pulse</div>
       <label class="trigger-pulse" onclick="event.stopPropagation()">Pulse
         <input type="number" min="200" max="60000" step="100" value="${scent.pulseMs}" data-pulse-index="${i}" />
         <span>ms</span>
       </label>`;
+      btn.querySelector(".dot").style.background = scent.color;
     btn.addEventListener("click", () => triggerScent(i, btn));
     btn.querySelector("[data-pulse-index]").addEventListener("change", (e) => updateTriggerPulse(i, e.target.value));
     grid.appendChild(btn);
@@ -256,23 +260,15 @@ const tracksEl = document.getElementById("tracks");
 document.getElementById("videoUpload").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const form = new FormData();
-  form.append("video", file);
-  toast("Uploading video…");
-  try {
-    const res = await fetch("/api/video/upload", { method: "POST", body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error);
-    toast("Video uploaded");
-    await loadVideoList();
-    document.getElementById("videoSelect").value = data.filename;
-    selectVideo(data.filename);
-  } catch (err) {
-    toast("Upload failed: " + err.message);
-  }
+  state.currentVideo = file.name;
+  state.selectedCue = null;
+  videoPlayer.src = URL.createObjectURL(file);
+  const t = await api(`/api/timeline/${encodeURIComponent(file.name)}`);
+  state.cues = t.cues || [];
+  renderTracks();
+  videoPlayer.addEventListener("loadedmetadata", () => { renderRuler(); renderCues(); }, { once: true });
+  toast("Video loaded");
 });
-
-document.getElementById("videoSelect").addEventListener("change", (e) => selectVideo(e.target.value));
 
 document.getElementById("saveTimelineBtn").addEventListener("click", async () => {
   if (!state.currentVideo) return toast("Upload or pick a video first");
@@ -287,31 +283,13 @@ document.getElementById("saveTimelineBtn").addEventListener("click", async () =>
   }
 });
 
-async function loadVideoList() {
-  const { videos } = await api("/api/videos");
-  const select = document.getElementById("videoSelect");
-  select.innerHTML = `<option value="">Select a video…</option>` + videos.map((v) => `<option value="${v.filename}">${v.filename}</option>`).join("");
-}
-
-async function selectVideo(filename) {
-  if (!filename) return;
-  state.currentVideo = filename;
-  state.selectedCue = null;
-  updateCueInspector();
-  videoPlayer.src = `/uploads/${filename}`;
-  const timeline = await api(`/api/timeline/${encodeURIComponent(filename)}`);
-  state.cues = timeline.cues || [];
-  renderTracks();
-  videoPlayer.addEventListener("loadedmetadata", () => { renderRuler(); renderCues(); }, { once: true });
-}
-
 function renderTracks() {
   tracksEl.innerHTML = "";
   const scents = state.settings.scents;
   scents.forEach((scent, i) => {
     const track = document.createElement("div");
     track.className = "track";
-    track.innerHTML = `<span class="track-label">${scent.name}</span><div class="track-lane" data-scent="${i}"></div>`;
+    track.innerHTML = `<span class="track-label">${escapeHtml(scent.name)}</span><div class="track-lane" data-scent="${i}"></div>`;
     tracksEl.appendChild(track);
 
     const lane = track.querySelector(".track-lane");
