@@ -9,29 +9,45 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EWELINK_REDIRECT_URL =
   process.env.EWELINK_REDIRECT_URL || "https://ascent-nu-six.vercel.app/auth/callback";
 
-// ---------- firebase ----------
-if (!getApps().length) {
-  initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+// ---------- firebase (lazy, so a bad env var gives a readable error) ----------
+let _db = null;
+function getDb() {
+  if (_db) return _db;
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+    throw new Error("FIREBASE_SERVICE_ACCOUNT is not set in Vercel.");
+  }
+  if (!getApps().length) {
+    let account;
+    try {
+      account = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    } catch {
+      throw new Error("FIREBASE_SERVICE_ACCOUNT is not valid JSON. Paste the whole key file.");
+    }
+    if (account.private_key) account.private_key = account.private_key.replace(/\\n/g, "\n");
+    initializeApp({ credential: cert(account) });
+  }
+  _db = getFirestore();
+  return _db;
 }
-const db = getFirestore();
-const configRef = db.collection("ascent").doc("config");
-const tokenRef = db.collection("ascent").doc("token");
-const timelines = db.collection("timelines");
+
+const configRef = () => getDb().collection("ascent").doc("config");
+const tokenRef = () => getDb().collection("ascent").doc("token");
+const timelines = () => getDb().collection("timelines");
 
 const getConfig = async () => {
-  const s = await configRef.get();
+  const s = await configRef().get();
   return { scents: [], ...(s.exists ? s.data() : {}) };
 };
 const saveConfig = async (partial) => {
   const merged = { ...(await getConfig()), ...partial };
-  await configRef.set(merged);
+  await configRef().set(merged);
   return merged;
 };
 const getToken = async () => {
-  const s = await tokenRef.get();
+  const s = await tokenRef().get();
   return s.exists ? s.data() : null;
 };
-const saveToken = async (t) => (t ? tokenRef.set(t) : tokenRef.delete());
+const saveToken = async (t) => (t ? tokenRef().set(t) : tokenRef().delete());
 const getCreds = () => ({
   appId: process.env.EWELINK_APP_ID,
   appSecret: process.env.EWELINK_APP_SECRET,
@@ -64,6 +80,17 @@ const randomString = (n) =>
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
+
+// quick check that the server is alive: open /api/health in the browser
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    hasAppId: Boolean(process.env.EWELINK_APP_ID),
+    hasAppSecret: Boolean(process.env.EWELINK_APP_SECRET),
+    hasFirebaseKey: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT),
+    redirectUrl: EWELINK_REDIRECT_URL,
+  });
+});
 
 // ---------- settings ----------
 app.get("/api/settings", async (_req, res) => {
@@ -106,8 +133,8 @@ app.post("/api/settings", async (req, res) => {
       removedScentIndex >= 0 &&
       removedScentIndex < existing.length
     ) {
-      const snap = await timelines.get();
-      const batch = db.batch();
+      const snap = await timelines().get();
+      const batch = getDb().batch();
       snap.forEach((doc) => {
         const t = doc.data();
         if (Array.isArray(t.cues)) {
@@ -132,13 +159,17 @@ app.get("/auth/login", (_req, res) => {
   if (!appId || !appSecret) {
     return res.status(400).send("EWELINK_APP_ID / EWELINK_APP_SECRET are not set in Vercel.");
   }
-  const client = new eWeLink.WebAPI({ appId, appSecret, region: "us", requestRecord: false });
-  const loginUrl = client.oauth.createLoginUrl({
-    redirectUrl: EWELINK_REDIRECT_URL,
-    grantType: "authorization_code",
-    state: randomString(10),
-  });
-  res.redirect(loginUrl);
+  try {
+    const client = new eWeLink.WebAPI({ appId, appSecret, region: "us", requestRecord: false });
+    const loginUrl = client.oauth.createLoginUrl({
+      redirectUrl: EWELINK_REDIRECT_URL,
+      grantType: "authorization_code",
+      state: randomString(10),
+    });
+    res.redirect(loginUrl);
+  } catch (err) {
+    res.status(500).send("Couldn't build the eWeLink login URL: " + err.message);
+  }
 });
 
 app.get("/auth/callback", async (req, res) => {
@@ -164,15 +195,19 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 app.post("/api/auth/logout", async (_req, res) => {
-  await saveToken(null);
-  res.json({ ok: true });
+  try {
+    await saveToken(null);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---------- devices ----------
 app.get("/api/devices", async (_req, res) => {
-  const client = await buildClient();
-  if (!client || !client.at) return res.status(401).json({ error: "Not logged in to eWeLink yet." });
   try {
+    const client = await buildClient();
+    if (!client || !client.at) return res.status(401).json({ error: "Not logged in to eWeLink yet." });
     const result = await client.device.getAllThingsAllPages();
     const list = (result?.thingList || result?.data?.thingList || [])
       .map((t) => t.itemData || t)
@@ -205,12 +240,12 @@ async function pulseRelay(scentIndex, overrideMs) {
 }
 
 app.post("/api/scent/:idx/trigger", async (req, res) => {
-  const idx = Number(req.params.idx);
-  const scents = (await getConfig()).scents;
-  if (!Number.isInteger(idx) || idx < 0 || idx >= scents.length) {
-    return res.status(400).json({ error: "Invalid scent index" });
-  }
   try {
+    const idx = Number(req.params.idx);
+    const scents = (await getConfig()).scents;
+    if (!Number.isInteger(idx) || idx < 0 || idx >= scents.length) {
+      return res.status(400).json({ error: "Invalid scent index" });
+    }
     const duration = await pulseRelay(idx, req.body?.duration);
     res.json({ ok: true, duration });
   } catch (err) {
@@ -220,14 +255,27 @@ app.post("/api/scent/:idx/trigger", async (req, res) => {
 
 // ---------- timelines ----------
 app.get("/api/timeline/:video", async (req, res) => {
-  const s = await timelines.doc(timelineId(req.params.video)).get();
-  res.json(s.exists ? s.data() : { video: req.params.video, cues: [] });
+  try {
+    const s = await timelines().doc(timelineId(req.params.video)).get();
+    res.json(s.exists ? s.data() : { video: req.params.video, cues: [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post("/api/timeline/:video", async (req, res) => {
-  const cues = Array.isArray(req.body?.cues) ? req.body.cues : [];
-  await timelines.doc(timelineId(req.params.video)).set({ video: req.params.video, cues });
-  res.json({ ok: true });
+  try {
+    const cues = Array.isArray(req.body?.cues) ? req.body.cues : [];
+    await timelines().doc(timelineId(req.params.video)).set({ video: req.params.video, cues });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- fallback: tells you the server is running but the path is wrong ----------
+app.use((req, res) => {
+  res.status(404).send(`ASCENT server: no route for ${req.method} ${req.path}`);
 });
 
 // ---------- start ----------
