@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ASCENT</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">ASCENT</span>
+      </div>
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="scents">Scents</button>
+        <button class="tab-btn" data-tab="timeline">Timeline</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
+      </nav>
+      <div class="status" id="connStatus">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">checking…</span>
+      </div>
+    </header>
+
+    <main>
+      <!-- SCENTS TAB -->
+      <section class="tab-panel active" id="tab-scents">
+        <p class="hint">Press a button to release that scent. Press multiple to mix.</p>
+        <div class="scent-grid" id="scentGrid"></div>
+      </section>
+
+      <!-- TIMELINE TAB -->
+      <section class="tab-panel" id="tab-timeline">
+        <div class="timeline-toolbar">
+          <label class="upload-btn">
+            Upload video
+            <input type="file" id="videoUpload" accept="video/*" hidden />
+          </label>
+          <select id="videoSelect"></select>
+          <button id="saveTimelineBtn" class="secondary-btn">Save timeline</button>
+          <span class="hint-inline">Click a track to drop a cue at the playhead. Drag a cue to move it. Double-click a cue to delete it.</span>
+        </div>
+
+        <div class="video-wrap">
+          <video id="videoPlayer" controls></video>
+        </div>
+
+        <div class="ruler-wrap">
+          <div class="ruler" id="ruler"></div>
+          <div class="playhead" id="playhead"></div>
+        </div>
+
+        <div class="tracks" id="tracks"></div>
+
+        <div class="timeline-inspector" id="timelineInspector" hidden>
+          <div>
+            <strong id="selectedCueLabel">Cue timing</strong>
+            <span class="hint-inline">Select a cue to adjust when it starts and how long it pulses.</span>
+          </div>
+          <label>Start (s)
+            <input type="number" id="cueTimeInput" min="0" step="0.1" />
+          </label>
+          <label>Pulse (s)
+            <input type="number" id="cueDurationInput" min="0.2" step="0.1" />
+          </label>
+          <button id="applyCueTimingBtn" class="secondary-btn">Apply timing</button>
+        </div>
+      </section>
+
+      <!-- SETTINGS TAB -->
+      <section class="tab-panel" id="tab-settings">
+        <div class="settings-grid">
+
+          <div class="card">
+            <h3>eWeLink connection</h3>
+            <p class="micro-hint">Put your eWeLink App ID and App Secret in <code>data/secrets.json</code>. That file is ignored by Git.</p>
+            <label>Redirect URL
+              <input type="text" id="redirectUrl" placeholder="http://10.9.137.250:4321/auth/callback" />
+            </label>
+            <p class="micro-hint">This must exactly match the Redirect URL saved in your eWeLink app (dev.ewelink.cc).</p>
+            <div class="row-actions">
+              <button id="saveSettingsBtn" class="secondary-btn">Save</button>
+              <button id="loginBtn" class="primary-btn">Connect eWeLink account</button>
+              <button id="logoutBtn" class="ghost-btn">Disconnect</button>
+            </div>
+            <div class="row-actions">
+              <button id="fetchDevicesBtn" class="secondary-btn">Fetch devices</button>
+              <span class="hint-inline" id="deviceFetchHint"></span>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Scents</h3>
+            <div id="scentSettingsList" class="scent-settings-list"></div>
+          </div>
+
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

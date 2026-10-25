@@ -1,0 +1,15 @@
+{
+  "name": "ascent-scent-controller",
+  "version": "2.0.0",
+  "description": "Scent releaser controller - eWeLink OAuth edition",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "ewelink-api-next": "^1.0.4",
+    "multer": "^2.4.0"
+  }
+}
