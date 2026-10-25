@@ -146,15 +146,30 @@ function renderScentSettings(scents) {
 }
 
 document.getElementById("addScentBtn").addEventListener("click", () => {
+  const deviceId = window.prompt("Enter the device ID for the 4-outlet relay:");
+  if (deviceId === null) return;
+  const normalizedDeviceId = deviceId.trim();
+  if (!normalizedDeviceId) {
+    toast("Enter a device ID to add a device");
+    return;
+  }
+
   const scents = collectScentSettings();
+  if (scents.some((scent) => scent.deviceId.trim() === normalizedDeviceId)) {
+    toast("That device ID has already been added");
+    return;
+  }
+
   const colors = ["#a8d5ba", "#bcdfc0", "#cfe8cd", "#e2f0da"];
-  scents.push({
-    name: `Device ${scents.length + 1}`,
-    color: colors[scents.length % colors.length],
-    deviceId: "",
-    outlet: 0,
-    pulseMs: 3000,
-  });
+  for (let outlet = 0; outlet < 4; outlet += 1) {
+    scents.push({
+      name: `Scent ${outlet + 1}`,
+      color: colors[outlet],
+      deviceId: normalizedDeviceId,
+      outlet,
+      pulseMs: 3000,
+    });
+  }
   renderScentSettings(scents);
 });
 
