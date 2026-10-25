@@ -191,7 +191,6 @@ app.post("/api/settings", async (req, res) => {
 });
 
 // ---------- owner-only eWeLink connection ----------
-// Open once yourself:  /auth/login?key=YOUR_ADMIN_KEY
 app.get("/auth/login", (req, res) => {
   if (!process.env.ADMIN_KEY || req.query.key !== process.env.ADMIN_KEY) {
     return res.status(403).send("Forbidden");
