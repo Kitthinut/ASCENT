@@ -1,6 +1,8 @@
 const state = {
-  settings: null,
+  settings: { scents: [] },
   currentVideo: null,
+  videoUrl: null,
+  renderedFor: null,
   cues: [], // { scent: 0-3, time: seconds, duration: seconds }
   selectedCue: null,
   firedThisPass: new Set(),
@@ -69,13 +71,13 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 // ---------- settings ----------
 async function loadSettings() {
   const s = await api("/api/settings");
-  state.settings = s;
-  renderScentSettings(s.scents);
-  renderScentButtons(s.scents);
+  state.settings = { scents: s.scents || [] };
+  renderScentSettings(state.settings.scents);
+  renderScentButtons(state.settings.scents);
   updateStatus(s.loggedIn);
 }
 
-// "loggedIn" now means: the ASCENT server is connected to eWeLink (done once by the admin)
+// "loggedIn" means: the ASCENT server is connected to eWeLink (done once by the admin)
 function updateStatus(serverReady) {
   const dot = document.getElementById("statusDot");
   const text = document.getElementById("statusText");
@@ -96,13 +98,19 @@ document.getElementById("saveSettingsBtn").addEventListener("click", async () =>
     return;
   }
   try {
-    const { config } = await api("/api/settings", { method: "POST", body: JSON.stringify({ scents }) });
-    state.settings.scents = config.scents;
-    toast("Settings saved");
-    renderScentSettings(config.scents);
-    renderScentButtons(config.scents);
+    const res = await api("/api/settings", { method: "POST", body: JSON.stringify({ scents }) });
+    console.log("save response:", res);
+    const saved = res?.config?.scents;
+    if (!Array.isArray(saved) || saved.length !== scents.length) {
+      throw new Error("Server didn't return the saved devices");
+    }
+    state.settings.scents = saved;
+    renderScentSettings(saved);
+    renderScentButtons(saved);
     renderTracks();
+    toast("Settings saved");
   } catch (err) {
+    console.error(err);
     toast("Couldn't save: " + err.message);
   }
 });
@@ -124,10 +132,8 @@ function renderScentSettings(scents) {
       </label>
       <button type="button" class="delete-scent-btn" data-delete-scent="${i}" aria-label="Delete ${escapeHtml(scent.name)}">Delete</button>
       <div class="field-row">
-        <label>Outlet
-          <select data-field="outlet">
-            ${[0, 1, 2, 3].map((outlet) => `<option value="${outlet}" ${Number(scent.outlet) === outlet ? "selected" : ""}>${outlet} — Scent ${outlet + 1}</option>`).join("")}
-          </select>
+        <label>Outlet (0-3 for a 4-ch relay)
+          <input type="number" min="0" max="3" value="${escapeHtml(scent.outlet)}" data-field="outlet" />
         </label>
         <label>Pulse (ms)
           <input type="number" min="200" step="100" value="${escapeHtml(scent.pulseMs)}" data-field="pulseMs" />
@@ -141,27 +147,15 @@ function renderScentSettings(scents) {
 
 document.getElementById("addScentBtn").addEventListener("click", () => {
   const scents = collectScentSettings();
-  const deviceIdInput = document.getElementById("newDeviceId");
-  const deviceId = deviceIdInput.value.trim();
-  if (!deviceId) {
-    toast("Enter a device ID first");
-    deviceIdInput.focus();
-    return;
-  }
-
   const colors = ["#a8d5ba", "#bcdfc0", "#cfe8cd", "#e2f0da"];
-  for (let outlet = 0; outlet < 4; outlet += 1) {
-    scents.push({
-      name: `Scent ${outlet + 1}`,
-      color: colors[outlet],
-      deviceId,
-      outlet,
-      pulseMs: 3000,
-    });
-  }
-  deviceIdInput.value = "";
+  scents.push({
+    name: `Device ${scents.length + 1}`,
+    color: colors[scents.length % colors.length],
+    deviceId: "",
+    outlet: 0,
+    pulseMs: 3000,
+  });
   renderScentSettings(scents);
-  toast("Added four scent channels");
 });
 
 document.getElementById("scentSettingsList").addEventListener("click", async (event) => {
@@ -192,7 +186,7 @@ async function deleteScent(index) {
       ? state.cues.indexOf(selectedCue)
       : null;
     state.firedThisPass.clear();
-    state.settings = { ...state.settings, ...config };
+    state.settings = { ...state.settings, scents: config.scents };
     renderScentSettings(config.scents);
     renderScentButtons(config.scents);
     renderTracks();
@@ -278,11 +272,63 @@ const ruler = document.getElementById("ruler");
 const playhead = document.getElementById("playhead");
 const tracksEl = document.getElementById("tracks");
 
-// the video stays on the user's device; only the cue list is saved (by file name)
+// ---------- media adapter: local file or YouTube ----------
+const media = {
+  type: "file", // "file" | "youtube"
+  yt: null,
+  ytReady: false,
+  pendingId: null,
+  duration() {
+    return this.type === "youtube" ? (this.yt?.getDuration?.() || 0) : (videoPlayer.duration || 0);
+  },
+  time() {
+    return this.type === "youtube" ? (this.yt?.getCurrentTime?.() || 0) : (videoPlayer.currentTime || 0);
+  },
+  playing() {
+    return this.type === "youtube" ? this.yt?.getPlayerState?.() === 1 : !videoPlayer.paused;
+  },
+  seek(t) {
+    if (this.type === "youtube") this.yt?.seekTo?.(t, true);
+    else videoPlayer.currentTime = t;
+  },
+};
+
+let ytApiPromise = null;
+function loadYouTubeApi() {
+  if (window.YT?.Player) return Promise.resolve();
+  if (!ytApiPromise) {
+    ytApiPromise = new Promise((resolve, reject) => {
+      window.onYouTubeIframeAPIReady = resolve;
+      const s = document.createElement("script");
+      s.src = "https://www.youtube.com/iframe_api";
+      s.onerror = () => { ytApiPromise = null; reject(new Error("YouTube API failed to load")); };
+      document.head.appendChild(s);
+    });
+  }
+  return ytApiPromise;
+}
+
+function parseYouTubeId(input) {
+  const text = input.trim();
+  const m = text.match(/(?:youtu\.be\/|[?&]v=|embed\/|shorts\/)([A-Za-z0-9_-]{11})/);
+  if (m) return m[1];
+  return /^[A-Za-z0-9_-]{11}$/.test(text) ? text : null;
+}
+
+function useFileMode() {
+  media.type = "file";
+  try { media.yt?.pauseVideo?.(); } catch {}
+  document.getElementById("ytWrap").hidden = true;
+  videoPlayer.hidden = false;
+  state.renderedFor = null;
+}
+
+// local file: the video stays on the user's device; only the cue list is saved (by file name)
 document.getElementById("videoUpload").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
+  useFileMode();
   if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
   state.videoUrl = URL.createObjectURL(file);
   state.currentVideo = file.name;
@@ -300,7 +346,58 @@ document.getElementById("videoUpload").addEventListener("change", async (e) => {
     toast("Couldn't load saved timeline: " + err.message);
   }
   renderTracks();
-  videoPlayer.addEventListener("loadedmetadata", () => { renderRuler(); renderCues(); }, { once: true });
+});
+
+// YouTube link
+document.getElementById("ytBtn").addEventListener("click", async () => {
+  const url = window.prompt("Paste a YouTube link:");
+  if (!url) return;
+  const id = parseYouTubeId(url);
+  if (!id) return toast("That doesn't look like a YouTube link");
+
+  try {
+    await loadYouTubeApi();
+  } catch (err) {
+    return toast(err.message);
+  }
+
+  videoPlayer.pause();
+  videoPlayer.hidden = true;
+  document.getElementById("ytWrap").hidden = false;
+  media.type = "youtube";
+  state.currentVideo = "yt_" + id;
+  state.selectedCue = null;
+  state.firedThisPass.clear();
+  state.renderedFor = null;
+  document.getElementById("videoName").textContent = "YouTube: " + id;
+  updateCueInspector();
+
+  media.pendingId = id;
+  if (!media.yt) {
+    media.yt = new YT.Player("ytPlayer", {
+      width: "100%",
+      height: "100%",
+      playerVars: { rel: 0, playsinline: 1 },
+      events: {
+        onReady: (e) => {
+          media.ytReady = true;
+          if (media.pendingId) e.target.cueVideoById(media.pendingId);
+        },
+        onError: () => toast("This video can't be played here (embedding may be disabled)"),
+      },
+    });
+  } else if (media.ytReady) {
+    media.yt.cueVideoById(id);
+  }
+
+  try {
+    const timeline = await api(`/api/timeline/${encodeURIComponent(state.currentVideo)}`);
+    state.cues = timeline.cues || [];
+  } catch (err) {
+    state.cues = [];
+    toast("Couldn't load saved timeline: " + err.message);
+  }
+  renderTracks();
 });
 
 document.getElementById("saveTimelineBtn").addEventListener("click", async () => {
@@ -328,7 +425,7 @@ function renderTracks() {
     const lane = track.querySelector(".track-lane");
     lane.addEventListener("click", (e) => {
       if (e.target !== lane) return; // ignore clicks on existing cues
-      const duration = videoPlayer.duration || 0;
+      const duration = media.duration();
       if (!duration) return toast("Choose a video first");
       const rect = lane.getBoundingClientRect();
       const ratio = (e.clientX - rect.left) / rect.width;
@@ -343,21 +440,21 @@ function renderTracks() {
 
 function renderRuler() {
   ruler.innerHTML = "";
-  const duration = videoPlayer.duration || 0;
+  const duration = media.duration();
   if (!duration) return;
   const step = duration > 120 ? 30 : duration > 40 ? 10 : 5;
   for (let t = 0; t <= duration; t += step) {
-    const tick = document.createElement("div");
-    tick.className = "tick";
-    tick.style.left = `${(t / duration) * 100}%`;
-    tick.innerHTML = `<span>${fmtTime(t)}</span>`;
-    ruler.appendChild(tick);
+    const tickEl = document.createElement("div");
+    tickEl.className = "tick";
+    tickEl.style.left = `${(t / duration) * 100}%`;
+    tickEl.innerHTML = `<span>${fmtTime(t)}</span>`;
+    ruler.appendChild(tickEl);
   }
   // assigned (not added) so it never stacks up when a new video is loaded
   ruler.onclick = (e) => {
     const rect = ruler.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
-    videoPlayer.currentTime = ratio * duration;
+    media.seek(ratio * duration);
   };
 }
 
@@ -365,7 +462,7 @@ function renderCues() {
   document.querySelectorAll(".track-lane").forEach((lane) => {
     lane.querySelectorAll(".cue").forEach((c) => c.remove());
   });
-  const duration = videoPlayer.duration || 0;
+  const duration = media.duration();
   if (!duration) return;
   state.cues.forEach((cue, cueIndex) => {
     const lane = document.querySelector(`.track-lane[data-scent="${cue.scent}"]`);
@@ -431,7 +528,7 @@ function updateCueInspector() {
 
 document.getElementById("applyCueTimingBtn").addEventListener("click", () => {
   const cue = state.selectedCue === null ? null : state.cues[state.selectedCue];
-  const duration = videoPlayer.duration || 0;
+  const duration = media.duration();
   if (!cue || !duration) return;
   const pulseSeconds = Math.max(0.2, Number(document.getElementById("cueDurationInput").value) || 0.2);
   cue.duration = Math.min(pulseSeconds, duration);
@@ -441,23 +538,30 @@ document.getElementById("applyCueTimingBtn").addEventListener("click", () => {
 });
 
 // playhead + playback-triggered scent firing
+let lastMediaTime = 0;
 function tick() {
-  const duration = videoPlayer.duration || 0;
+  const duration = media.duration();
   if (duration) {
-    const ratio = videoPlayer.currentTime / duration;
-    playhead.style.left = `${ratio * 100}%`;
+    // draw ruler and cues once the duration is known (YouTube reports it late)
+    if (state.renderedFor !== state.currentVideo) {
+      state.renderedFor = state.currentVideo;
+      renderRuler();
+      renderCues();
+    }
 
-    if (!videoPlayer.paused) {
+    const now = media.time();
+    if (Math.abs(now - lastMediaTime) > 1) state.firedThisPass.clear(); // user jumped around
+    lastMediaTime = now;
+    playhead.style.left = `${(now / duration) * 100}%`;
+
+    if (media.playing()) {
       state.cues.forEach((cue, idx) => {
-        const key = idx;
-        const within = videoPlayer.currentTime >= cue.time && videoPlayer.currentTime < cue.time + 0.35;
-        if (within && !state.firedThisPass.has(key)) {
-          state.firedThisPass.add(key);
+        const within = now >= cue.time && now < cue.time + 0.35;
+        if (within && !state.firedThisPass.has(idx)) {
+          state.firedThisPass.add(idx);
           triggerScent(cue.scent, null, cue.duration);
         }
-        if (!within && videoPlayer.currentTime < cue.time) {
-          state.firedThisPass.delete(key);
-        }
+        if (!within && now < cue.time) state.firedThisPass.delete(idx);
       });
     }
   }
