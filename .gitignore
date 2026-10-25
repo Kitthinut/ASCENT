@@ -1,7 +1,0 @@
-node_modules
-.vercel
-.env
-.env.*
-!.env.example
-ascent-933d7-firebase-adminsdk-fbsvc-fe0ea5ef22.json
-firebase-config.json
