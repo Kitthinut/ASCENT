@@ -47,7 +47,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 async function loadSettings() {
   const s = await api("/api/settings");
   state.settings = s;
-  document.getElementById("redirectUrl").value = s.redirectUrl || "";
+  document.getElementById("deviceId").value = s.deviceId || "";
   renderScentSettings(s.scents);
   renderScentButtons(s.scents);
   updateStatus(s.loggedIn, s.region);
@@ -67,10 +67,12 @@ function updateStatus(loggedIn, region) {
 }
 
 document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
-  const redirectUrl = document.getElementById("redirectUrl").value.trim();
+  const deviceId = document.getElementById("deviceId").value.trim();
   const scents = collectScentSettings();
   try {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ redirectUrl, scents }) });
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ deviceId, scents }) });
+    state.settings.deviceId = deviceId;
+    state.settings.scents = scents;
     toast("Settings saved");
     renderScentButtons(scents);
   } catch (err) {
@@ -121,6 +123,7 @@ function renderScentSettings(scents) {
           ? `<select data-field="deviceId">${deviceOptions}</select>`
           : `<input type="text" value="${scent.deviceId}" data-field="deviceId" placeholder="device ID" />`}
       </label>
+      <button type="button" class="delete-scent-btn" data-delete-scent="${i}" aria-label="Delete ${scent.name}">Delete</button>
       <div class="field-row">
         <label>Outlet (0-3 for a 4-ch relay)
           <input type="number" min="0" max="3" value="${scent.outlet}" data-field="outlet" />
@@ -134,6 +137,50 @@ function renderScentSettings(scents) {
     row.dataset.index = i;
     wrap.appendChild(row);
   });
+}
+
+document.getElementById("scentSettingsList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-delete-scent]");
+  if (!button) return;
+  await deleteScent(Number(button.dataset.deleteScent));
+});
+
+async function deleteScent(index) {
+  const scents = collectScentSettings();
+  const scent = scents[index];
+  if (!scent) return;
+  if (scents.length === 1) {
+    toast("Keep at least one scent");
+    return;
+  }
+  if (!window.confirm(`Delete "${scent.name}"? Its timeline cues will also be removed.`)) return;
+
+  try {
+    const { config } = await api(`/api/settings/scents/${index}`, {
+      method: "DELETE",
+      body: JSON.stringify({
+        deviceId: document.getElementById("deviceId").value.trim(),
+        scents,
+      }),
+    });
+    const selectedCue = state.selectedCue === null ? null : state.cues[state.selectedCue];
+    const selectedCueDeleted = selectedCue?.scent === index;
+    state.cues = state.cues.filter((cue) => cue.scent !== index);
+    state.cues.forEach((cue) => {
+      if (cue.scent > index) cue.scent -= 1;
+    });
+    state.selectedCue = selectedCue && !selectedCueDeleted
+      ? state.cues.indexOf(selectedCue)
+      : null;
+    state.firedThisPass.clear();
+    state.settings = { ...state.settings, ...config };
+    renderScentSettings(config.scents);
+    renderScentButtons(config.scents);
+    renderTracks();
+    toast("Scent deleted");
+  } catch (err) {
+    toast("Couldn't delete scent: " + err.message);
+  }
 }
 
 function collectScentSettings() {

@@ -76,10 +76,10 @@
           <div class="card">
             <h3>eWeLink connection</h3>
             <p class="micro-hint">Put your eWeLink App ID and App Secret in <code>data/secrets.json</code>. That file is ignored by Git.</p>
-            <label>Redirect URL
-              <input type="text" id="redirectUrl" placeholder="http://10.9.137.250:4321/auth/callback" />
+            <label>Device ID
+              <input type="text" id="deviceId" placeholder="Enter device ID" />
             </label>
-            <p class="micro-hint">This must exactly match the Redirect URL saved in your eWeLink app (dev.ewelink.cc).</p>
+            <p class="micro-hint">OAuth callback is handled by Vercel. Scent triggers continue to use the Device IDs configured below.</p>
             <div class="row-actions">
               <button id="saveSettingsBtn" class="secondary-btn">Save</button>
               <button id="loginBtn" class="primary-btn">Connect eWeLink account</button>

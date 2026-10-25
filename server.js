@@ -11,6 +11,7 @@ const UPLOADS_DIR = path.join(__dirname, "uploads");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 const SECRETS_PATH = path.join(DATA_DIR, "secrets.json");
 const TIMELINES_DIR = path.join(DATA_DIR, "timelines");
+const EWELINK_REDIRECT_URL = process.env.EWELINK_REDIRECT_URL || "https://ascent-nu-six.vercel.app/auth/callback";
 
 for (const dir of [DATA_DIR, UPLOADS_DIR, TIMELINES_DIR]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -18,7 +19,7 @@ for (const dir of [DATA_DIR, UPLOADS_DIR, TIMELINES_DIR]) {
 
 // ---------- config persistence ----------
 const DEFAULT_CONFIG = {
-  redirectUrl: "http://10.9.137.250:4321/auth/callback",
+  deviceId: "",
   scents: [
     { name: "Scent 1", color: "#a8d5ba", deviceId: "", outlet: 0, pulseMs: 3000 },
     { name: "Scent 2", color: "#bcdfc0", deviceId: "", outlet: 1, pulseMs: 3000 },
@@ -50,7 +51,7 @@ function getConfig() {
   const saved = readJSON(CONFIG_PATH, {});
   return {
     ...DEFAULT_CONFIG,
-    redirectUrl: saved.redirectUrl ?? DEFAULT_CONFIG.redirectUrl,
+    deviceId: saved.deviceId ?? DEFAULT_CONFIG.deviceId,
     scents: saved.scents ?? DEFAULT_CONFIG.scents
   };
 }
@@ -116,7 +117,7 @@ app.get("/api/settings", (_req, res) => {
   const cfg = getConfig();
   const secrets = getSecrets();
   res.json({
-    redirectUrl: cfg.redirectUrl,
+    deviceId: cfg.deviceId,
     scents: cfg.scents,
     loggedIn: Boolean(secrets.token?.data?.accessToken),
     region: secrets.token?.region || null
@@ -124,24 +125,64 @@ app.get("/api/settings", (_req, res) => {
 });
 
 app.post("/api/settings", (req, res) => {
-  const { redirectUrl, scents } = req.body || {};
+  const { deviceId, scents } = req.body || {};
   const partial = {};
-  if (typeof redirectUrl === "string") partial.redirectUrl = redirectUrl.trim();
-  if (Array.isArray(scents) && scents.length === 4) partial.scents = scents;
+  if (typeof deviceId === "string") partial.deviceId = deviceId.trim();
+  if (Array.isArray(scents) && scents.length >= 1 && scents.length <= 4) partial.scents = scents;
   const saved = saveConfig(partial);
   res.json({ ok: true, config: saved });
 });
 
+app.delete("/api/settings/scents/:idx", (req, res) => {
+  const index = Number(req.params.idx);
+  const { deviceId, scents } = req.body || {};
+  if (!Number.isInteger(index) || !Array.isArray(scents) || index < 0 || index >= scents.length || scents.length > 4) {
+    return res.status(400).json({ error: "Invalid scent index or settings" });
+  }
+  if (scents.length === 1) {
+    return res.status(400).json({ error: "At least one scent must remain" });
+  }
+
+  try {
+    const remainingScents = scents.filter((_scent, scentIndex) => scentIndex !== index);
+    const timelineUpdates = fs.readdirSync(TIMELINES_DIR)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => {
+        const filePath = path.join(TIMELINES_DIR, file);
+        const timeline = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        if (Array.isArray(timeline.cues)) {
+          timeline.cues = timeline.cues
+            .filter((cue) => cue.scent !== index)
+            .map((cue) => ({
+              ...cue,
+              scent: cue.scent > index ? cue.scent - 1 : cue.scent
+            }));
+        }
+        return { filePath, timeline };
+      });
+
+    for (const { filePath, timeline } of timelineUpdates) {
+      writeJSON(filePath, timeline);
+    }
+    const config = saveConfig({
+      ...(typeof deviceId === "string" ? { deviceId: deviceId.trim() } : {}),
+      scents: remainingScents
+    });
+    res.json({ ok: true, config });
+  } catch (err) {
+    res.status(500).json({ error: `Couldn't delete scent: ${err.message}` });
+  }
+});
+
 // ---------- oauth ----------
 app.get("/auth/login", (req, res) => {
-  const cfg = getConfig();
   const secrets = getSecrets();
   if (!secrets.appId || !secrets.appSecret) {
     return res.status(400).send("Set appId and appSecret in data/secrets.json first, then try again.");
   }
   const client = new eWeLink.WebAPI({ appId: secrets.appId, appSecret: secrets.appSecret, region: "us", requestRecord: false });
   const loginUrl = client.oauth.createLoginUrl({
-    redirectUrl: cfg.redirectUrl,
+    redirectUrl: EWELINK_REDIRECT_URL,
     grantType: "authorization_code",
     state: randomString(10)
   });
@@ -150,7 +191,6 @@ app.get("/auth/login", (req, res) => {
 
 app.get("/auth/callback", async (req, res) => {
   const { code, region } = req.query;
-  const cfg = getConfig();
   const secrets = getSecrets();
   if (!code || !region) {
     return res.status(400).send("Missing code/region from eWeLink redirect.");
@@ -159,7 +199,7 @@ app.get("/auth/callback", async (req, res) => {
     const client = new eWeLink.WebAPI({ appId: secrets.appId, appSecret: secrets.appSecret, region, requestRecord: false });
     const result = await client.oauth.getToken({
       region,
-      redirectUrl: cfg.redirectUrl,
+      redirectUrl: EWELINK_REDIRECT_URL,
       code
     });
     if (result.error !== 0) {
@@ -224,7 +264,9 @@ async function pulseRelay(scentIndex, overrideMs) {
 
 app.post("/api/scent/:idx/trigger", async (req, res) => {
   const idx = Number(req.params.idx);
-  if (Number.isNaN(idx) || idx < 0 || idx > 3) return res.status(400).json({ error: "Invalid scent index" });
+  if (!Number.isInteger(idx) || idx < 0 || idx >= getConfig().scents.length) {
+    return res.status(400).json({ error: "Invalid scent index" });
+  }
   try {
     const duration = await pulseRelay(idx, req.body?.duration);
     res.json({ ok: true, duration });
