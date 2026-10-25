@@ -15,10 +15,24 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove("show"), 2400);
 }
 
+// each browser gets its own id, so each person has their own devices and timelines
+function clientId() {
+  let id = localStorage.getItem("ascentClientId");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("ascentClientId", id);
+  }
+  return id;
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      "x-client-id": clientId(),
+      ...(opts.headers || {}),
+    },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
@@ -52,25 +66,26 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-// ---------- settings / connection ----------
+// ---------- settings ----------
 async function loadSettings() {
   const s = await api("/api/settings");
   state.settings = s;
   renderScentSettings(s.scents);
   renderScentButtons(s.scents);
-  updateStatus(s.loggedIn, s.region);
+  updateStatus(s.loggedIn);
 }
 
-function updateStatus(loggedIn, region) {
+// "loggedIn" now means: the ASCENT server is connected to eWeLink (done once by the admin)
+function updateStatus(serverReady) {
   const dot = document.getElementById("statusDot");
   const text = document.getElementById("statusText");
   dot.classList.remove("on", "off");
-  if (loggedIn) {
+  if (serverReady) {
     dot.classList.add("on");
-    text.textContent = region ? `connected · ${region}` : "connected";
+    text.textContent = "server ready";
   } else {
     dot.classList.add("off");
-    text.textContent = "not connected";
+    text.textContent = "server not connected";
   }
 }
 
@@ -86,19 +101,10 @@ document.getElementById("saveSettingsBtn").addEventListener("click", async () =>
     toast("Settings saved");
     renderScentSettings(config.scents);
     renderScentButtons(config.scents);
+    renderTracks();
   } catch (err) {
     toast("Couldn't save: " + err.message);
   }
-});
-
-document.getElementById("loginBtn").addEventListener("click", () => {
-  window.location.href = "/auth/login";
-});
-
-document.getElementById("logoutBtn").addEventListener("click", async () => {
-  await api("/api/auth/logout", { method: "POST" });
-  updateStatus(false, null);
-  toast("Disconnected from eWeLink");
 });
 
 // ---------- scent settings (settings tab) ----------
@@ -114,7 +120,7 @@ function renderScentSettings(scents) {
         <input type="text" value="${escapeHtml(scent.name)}" data-field="name" />
       </label>
       <label>Device
-        <input type="text" value="${escapeHtml(scent.deviceId)}" data-field="deviceId" placeholder="Enter known device ID" />
+        <input type="text" value="${escapeHtml(scent.deviceId)}" data-field="deviceId" placeholder="Enter your device ID" />
       </label>
       <button type="button" class="delete-scent-btn" data-delete-scent="${i}" aria-label="Delete ${escapeHtml(scent.name)}">Delete</button>
       <div class="field-row">
@@ -212,10 +218,10 @@ function renderScentButtons(scents) {
       <div class="label">${escapeHtml(scent.name)}</div>
       <div class="sub">${(scent.pulseMs / 1000).toFixed(1)}s pulse</div>
       <label class="trigger-pulse" onclick="event.stopPropagation()">Pulse
-        <input type="number" min="200" max="60000" step="100" value="${scent.pulseMs}" data-pulse-index="${i}" />
+        <input type="number" min="200" max="60000" step="100" value="${escapeHtml(scent.pulseMs)}" data-pulse-index="${i}" />
         <span>ms</span>
       </label>`;
-      btn.querySelector(".dot").style.background = scent.color;
+    btn.querySelector(".dot").style.background = scent.color;
     btn.addEventListener("click", () => triggerScent(i, btn));
     btn.querySelector("[data-pulse-index]").addEventListener("change", (e) => updateTriggerPulse(i, e.target.value));
     grid.appendChild(btn);
@@ -247,6 +253,7 @@ async function triggerScent(index, btnEl, overrideSeconds = null) {
   try {
     await api(`/api/scent/${index}/trigger`, { method: "POST", body: JSON.stringify({ duration }) });
   } catch (err) {
+    if (btnEl) btnEl.classList.remove("releasing");
     toast("Trigger failed: " + err.message);
   }
 }
@@ -257,21 +264,33 @@ const ruler = document.getElementById("ruler");
 const playhead = document.getElementById("playhead");
 const tracksEl = document.getElementById("tracks");
 
+// the video stays on the user's device; only the cue list is saved (by file name)
 document.getElementById("videoUpload").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+
+  if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
+  state.videoUrl = URL.createObjectURL(file);
   state.currentVideo = file.name;
   state.selectedCue = null;
-  videoPlayer.src = URL.createObjectURL(file);
-  const t = await api(`/api/timeline/${encodeURIComponent(file.name)}`);
-  state.cues = t.cues || [];
+  state.firedThisPass.clear();
+  document.getElementById("videoName").textContent = file.name;
+  videoPlayer.src = state.videoUrl;
+  updateCueInspector();
+
+  try {
+    const timeline = await api(`/api/timeline/${encodeURIComponent(file.name)}`);
+    state.cues = timeline.cues || [];
+  } catch (err) {
+    state.cues = [];
+    toast("Couldn't load saved timeline: " + err.message);
+  }
   renderTracks();
   videoPlayer.addEventListener("loadedmetadata", () => { renderRuler(); renderCues(); }, { once: true });
-  toast("Video loaded");
 });
 
 document.getElementById("saveTimelineBtn").addEventListener("click", async () => {
-  if (!state.currentVideo) return toast("Upload or pick a video first");
+  if (!state.currentVideo) return toast("Choose a video first");
   try {
     await api(`/api/timeline/${encodeURIComponent(state.currentVideo)}`, {
       method: "POST",
@@ -296,7 +315,7 @@ function renderTracks() {
     lane.addEventListener("click", (e) => {
       if (e.target !== lane) return; // ignore clicks on existing cues
       const duration = videoPlayer.duration || 0;
-      if (!duration) return toast("Load a video first");
+      if (!duration) return toast("Choose a video first");
       const rect = lane.getBoundingClientRect();
       const ratio = (e.clientX - rect.left) / rect.width;
       const time = Math.max(0, ratio * duration);
@@ -320,11 +339,12 @@ function renderRuler() {
     tick.innerHTML = `<span>${fmtTime(t)}</span>`;
     ruler.appendChild(tick);
   }
-  ruler.addEventListener("click", (e) => {
+  // assigned (not added) so it never stacks up when a new video is loaded
+  ruler.onclick = (e) => {
     const rect = ruler.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
     videoPlayer.currentTime = ratio * duration;
-  });
+  };
 }
 
 function renderCues() {
@@ -358,6 +378,7 @@ function renderCues() {
       e.stopPropagation();
       state.cues.splice(cueIndex, 1);
       state.selectedCue = null;
+      state.firedThisPass.clear();
       updateCueInspector();
       renderCues();
     });
@@ -434,6 +455,10 @@ videoPlayer.addEventListener("seeked", () => state.firedThisPass.clear());
 
 // ---------- init ----------
 (async function init() {
-  await loadSettings();
-  await loadVideoList();
+  try {
+    await loadSettings();
+  } catch (err) {
+    updateStatus(false);
+    toast("Couldn't load settings: " + err.message);
+  }
 })();

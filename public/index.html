@@ -35,11 +35,12 @@
       <section class="tab-panel" id="tab-timeline">
         <div class="timeline-toolbar">
           <label class="upload-btn">
-            Upload video
+            Choose video
             <input type="file" id="videoUpload" accept="video/*" hidden />
           </label>
+          <span class="hint-inline" id="videoName">No video loaded</span>
           <button id="saveTimelineBtn" class="secondary-btn">Save timeline</button>
-          <span class="hint-inline">Click a track to drop a cue at the playhead. Drag a cue to move it. Double-click a cue to delete it.</span>
+          <span class="hint-inline">Your video stays on your device. Click a track to drop a cue. Drag a cue to move it. Double-click a cue to delete it.</span>
         </div>
 
         <div class="video-wrap">
@@ -73,11 +74,10 @@
         <div class="settings-grid">
 
           <div class="card">
-            <h3>eWeLink connection</h3>
-            <div class="row-actions">
-              <button id="loginBtn" class="primary-btn">Connect eWeLink account</button>
-              <button id="logoutBtn" class="ghost-btn">Disconnect</button>
-            </div>
+            <h3>How to add your device</h3>
+            <p class="micro-hint">1. In the eWeLink app, open your device and choose Share, then share it to the ASCENT account.</p>
+            <p class="micro-hint">2. Wait for the admin to accept the share.</p>
+            <p class="micro-hint">3. Add your device ID below and press Save devices.</p>
           </div>
 
           <div class="card">

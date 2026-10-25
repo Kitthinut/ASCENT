@@ -9,7 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EWELINK_REDIRECT_URL =
   process.env.EWELINK_REDIRECT_URL || "https://ascent-nu-six.vercel.app/auth/callback";
 
-// ---------- firebase (lazy, so a bad env var gives a readable error) ----------
+// ---------- firebase ----------
 let _db = null;
 function getDb() {
   if (_db) return _db;
@@ -26,33 +26,47 @@ function getDb() {
     if (account.private_key) account.private_key = account.private_key.replace(/\\n/g, "\n");
     initializeApp({ credential: cert(account) });
   }
-  _db = getFirestore();
+  const db = getFirestore();
+  try {
+    db.settings({ ignoreUndefinedProperties: true });
+  } catch {
+    /* settings were already applied on this instance */
+  }
+  _db = db;
   return _db;
 }
 
-const configRef = () => getDb().collection("ascent").doc("config");
+// owner token (one, shared by the whole site)
 const tokenRef = () => getDb().collection("ascent").doc("token");
-const timelines = () => getDb().collection("timelines");
-
-const getConfig = async () => {
-  const s = await configRef().get();
-  return { scents: [], ...(s.exists ? s.data() : {}) };
-};
-const saveConfig = async (partial) => {
-  const merged = { ...(await getConfig()), ...partial };
-  await configRef().set(merged);
-  return merged;
-};
 const getToken = async () => {
   const s = await tokenRef().get();
   return s.exists ? s.data() : null;
 };
 const saveToken = async (t) => (t ? tokenRef().set(t) : tokenRef().delete());
+
+// per-browser data
+function getClientId(req) {
+  const id = String(req.get("x-client-id") || "");
+  if (!/^[a-zA-Z0-9-]{8,64}$/.test(id)) throw new Error("Missing or invalid client id");
+  return id;
+}
+const userRef = (id) => getDb().collection("users").doc(id);
+const getConfig = async (id) => {
+  const s = await userRef(id).get();
+  return { scents: [], ...(s.exists ? s.data() : {}) };
+};
+const saveConfig = async (id, partial) => {
+  const merged = { ...(await getConfig(id)), ...partial };
+  await userRef(id).set(merged);
+  return merged;
+};
+const timelines = (id) => userRef(id).collection("timelines");
+const timelineId = (video) => "t_" + video.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+
 const getCreds = () => ({
   appId: process.env.EWELINK_APP_ID,
   appSecret: process.env.EWELINK_APP_SECRET,
 });
-const timelineId = (video) => "t_" + video.replace(/[^a-zA-Z0-9.\-_]/g, "_");
 
 // ---------- eWeLink client ----------
 async function buildClient() {
@@ -81,25 +95,38 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// quick check that the server is alive: open /api/health in the browser
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     hasAppId: Boolean(process.env.EWELINK_APP_ID),
     hasAppSecret: Boolean(process.env.EWELINK_APP_SECRET),
     hasFirebaseKey: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT),
+    hasAdminKey: Boolean(process.env.ADMIN_KEY),
     redirectUrl: EWELINK_REDIRECT_URL,
   });
 });
 
-// ---------- settings ----------
-app.get("/api/settings", async (_req, res) => {
+// tests that the server can really write to Firestore
+app.get("/api/debug", async (_req, res) => {
   try {
-    const cfg = await getConfig();
+    const ref = getDb().collection("debug").doc("ping");
+    await ref.set({ at: Date.now() });
+    const snap = await ref.get();
+    res.json({ firestoreWrite: "ok", readBack: snap.data() });
+  } catch (err) {
+    res.status(500).json({ firestoreWrite: "failed", error: err.message });
+  }
+});
+
+// ---------- settings (per browser) ----------
+app.get("/api/settings", async (req, res) => {
+  try {
+    const id = getClientId(req);
+    const cfg = await getConfig(id);
     const token = await getToken();
     res.json({
       scents: cfg.scents,
-      loggedIn: Boolean(token?.data?.accessToken),
+      loggedIn: Boolean(token?.data?.accessToken), // means: the server is connected to eWeLink
       region: token?.region || null,
     });
   } catch (err) {
@@ -108,32 +135,41 @@ app.get("/api/settings", async (_req, res) => {
 });
 
 app.post("/api/settings", async (req, res) => {
-  const { scents, removedScentIndex } = req.body || {};
-  const partial = {};
-  if (scents !== undefined) {
-    const valid =
-      Array.isArray(scents) &&
-      scents.every(
-        (s) =>
-          s &&
-          typeof s.name === "string" &&
-          typeof s.color === "string" &&
-          typeof s.deviceId === "string" &&
-          Number.isFinite(Number(s.outlet)) &&
-          Number.isFinite(Number(s.pulseMs))
-      );
-    if (!valid) return res.status(400).json({ error: "Invalid device settings" });
-    partial.scents = scents.map((s) => ({ ...s, deviceId: s.deviceId.trim() }));
-  }
-
   try {
-    const existing = (await getConfig()).scents;
+    const id = getClientId(req);
+    const { scents, removedScentIndex } = req.body || {};
+    const partial = {};
+
+    if (scents !== undefined) {
+      const valid =
+        Array.isArray(scents) &&
+        scents.every(
+          (s) =>
+            s &&
+            typeof s.name === "string" &&
+            typeof s.color === "string" &&
+            typeof s.deviceId === "string" &&
+            Number.isFinite(Number(s.outlet)) &&
+            Number.isFinite(Number(s.pulseMs))
+        );
+      if (!valid) return res.status(400).json({ error: "Invalid device settings" });
+      // keep only known fields, with clean types
+      partial.scents = scents.map((s) => ({
+        name: s.name.trim().slice(0, 60),
+        color: s.color,
+        deviceId: s.deviceId.trim(),
+        outlet: Number(s.outlet) || 0,
+        pulseMs: Number(s.pulseMs) || 3000,
+      }));
+    }
+
+    const existing = (await getConfig(id)).scents;
     if (
       Number.isInteger(removedScentIndex) &&
       removedScentIndex >= 0 &&
       removedScentIndex < existing.length
     ) {
-      const snap = await timelines().get();
+      const snap = await timelines(id).get();
       const batch = getDb().batch();
       snap.forEach((doc) => {
         const t = doc.data();
@@ -146,15 +182,20 @@ app.post("/api/settings", async (req, res) => {
       });
       await batch.commit();
     }
-    const config = await saveConfig(partial);
-    res.json({ ok: true, config });
+
+    const config = await saveConfig(id, partial);
+    res.json({ ok: true, config: { scents: config.scents } });
   } catch (err) {
     res.status(500).json({ error: `Couldn't save device settings: ${err.message}` });
   }
 });
 
-// ---------- oauth ----------
-app.get("/auth/login", (_req, res) => {
+// ---------- owner-only eWeLink connection ----------
+// Open once yourself:  /auth/login?key=YOUR_ADMIN_KEY
+app.get("/auth/login", (req, res) => {
+  if (!process.env.ADMIN_KEY || req.query.key !== process.env.ADMIN_KEY) {
+    return res.status(403).send("Forbidden");
+  }
   const { appId, appSecret } = getCreds();
   if (!appId || !appSecret) {
     return res.status(400).send("EWELINK_APP_ID / EWELINK_APP_SECRET are not set in Vercel.");
@@ -185,53 +226,32 @@ app.get("/auth/callback", async (req, res) => {
     result.region = region;
     await saveToken(JSON.parse(JSON.stringify(result)));
     res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:60px;">
-      <h2>Connected to eWeLink ✅</h2>
-      <p>You can close this tab and go back to ASCENT.</p>
-      <script>setTimeout(()=>{ window.location.href = "/"; }, 1200);</script>
+      <h2>Owner account connected ✅</h2>
+      <p>Users can now add their device IDs in ASCENT.</p>
     </body></html>`);
   } catch (err) {
     res.status(500).send("OAuth exchange failed: " + err.message);
   }
 });
 
-app.post("/api/auth/logout", async (_req, res) => {
-  try {
-    await saveToken(null);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ---------- devices ----------
-app.get("/api/devices", async (_req, res) => {
-  try {
-    const client = await buildClient();
-    if (!client || !client.at) return res.status(401).json({ error: "Not logged in to eWeLink yet." });
-    const result = await client.device.getAllThingsAllPages();
-    const list = (result?.thingList || result?.data?.thingList || [])
-      .map((t) => t.itemData || t)
-      .filter(Boolean)
-      .map((d) => ({ id: d.deviceid, name: d.name, type: d.extra?.uiid, online: d.online }));
-    res.json({ devices: list });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ---------- relay control ----------
-async function pulseRelay(scentIndex, overrideMs) {
-  const scent = (await getConfig()).scents[scentIndex];
+async function pulseRelay(scentIndex, id, overrideMs) {
+  const scent = (await getConfig(id)).scents[scentIndex];
   if (!scent || !scent.deviceId) throw new Error("This scent has no device assigned yet (Settings tab).");
   const client = await buildClient();
-  if (!client || !client.at) throw new Error("Not logged in to eWeLink yet.");
+  if (!client || !client.at) {
+    throw new Error("The ASCENT server isn't connected to eWeLink yet. Contact the admin.");
+  }
 
   const outlet = Number(scent.outlet) || 0;
   const duration = overrideMs || scent.pulseMs || 3000;
 
-  await client.device.setThingStatus({
+  const on = await client.device.setThingStatus({
     type: 1, id: scent.deviceId, params: { switches: [{ switch: "on", outlet }] },
   });
+  if (on?.error && on.error !== 0) {
+    throw new Error(`eWeLink refused: ${on.msg || on.error}. Is the device shared to the ASCENT account?`);
+  }
   await new Promise((r) => setTimeout(r, duration)); // must finish before responding on Vercel
   await client.device.setThingStatus({
     type: 1, id: scent.deviceId, params: { switches: [{ switch: "off", outlet }] },
@@ -241,22 +261,24 @@ async function pulseRelay(scentIndex, overrideMs) {
 
 app.post("/api/scent/:idx/trigger", async (req, res) => {
   try {
+    const id = getClientId(req);
     const idx = Number(req.params.idx);
-    const scents = (await getConfig()).scents;
+    const scents = (await getConfig(id)).scents;
     if (!Number.isInteger(idx) || idx < 0 || idx >= scents.length) {
       return res.status(400).json({ error: "Invalid scent index" });
     }
-    const duration = await pulseRelay(idx, req.body?.duration);
+    const duration = await pulseRelay(idx, id, req.body?.duration);
     res.json({ ok: true, duration });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-// ---------- timelines ----------
+// ---------- timelines (per browser) ----------
 app.get("/api/timeline/:video", async (req, res) => {
   try {
-    const s = await timelines().doc(timelineId(req.params.video)).get();
+    const id = getClientId(req);
+    const s = await timelines(id).doc(timelineId(req.params.video)).get();
     res.json(s.exists ? s.data() : { video: req.params.video, cues: [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -265,15 +287,16 @@ app.get("/api/timeline/:video", async (req, res) => {
 
 app.post("/api/timeline/:video", async (req, res) => {
   try {
+    const id = getClientId(req);
     const cues = Array.isArray(req.body?.cues) ? req.body.cues : [];
-    await timelines().doc(timelineId(req.params.video)).set({ video: req.params.video, cues });
+    await timelines(id).doc(timelineId(req.params.video)).set({ video: req.params.video, cues });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- fallback: tells you the server is running but the path is wrong ----------
+// ---------- fallback ----------
 app.use((req, res) => {
   res.status(404).send(`ASCENT server: no route for ${req.method} ${req.path}`);
 });
