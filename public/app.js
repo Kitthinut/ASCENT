@@ -124,8 +124,10 @@ function renderScentSettings(scents) {
       </label>
       <button type="button" class="delete-scent-btn" data-delete-scent="${i}" aria-label="Delete ${escapeHtml(scent.name)}">Delete</button>
       <div class="field-row">
-        <label>Outlet (0-3 for a 4-ch relay)
-          <input type="number" min="0" max="3" value="${escapeHtml(scent.outlet)}" data-field="outlet" />
+        <label>Outlet
+          <select data-field="outlet">
+            ${[0, 1, 2, 3].map((outlet) => `<option value="${outlet}" ${Number(scent.outlet) === outlet ? "selected" : ""}>${outlet} — Scent ${outlet + 1}</option>`).join("")}
+          </select>
         </label>
         <label>Pulse (ms)
           <input type="number" min="200" step="100" value="${escapeHtml(scent.pulseMs)}" data-field="pulseMs" />
@@ -139,15 +141,27 @@ function renderScentSettings(scents) {
 
 document.getElementById("addScentBtn").addEventListener("click", () => {
   const scents = collectScentSettings();
+  const deviceIdInput = document.getElementById("newDeviceId");
+  const deviceId = deviceIdInput.value.trim();
+  if (!deviceId) {
+    toast("Enter a device ID first");
+    deviceIdInput.focus();
+    return;
+  }
+
   const colors = ["#a8d5ba", "#bcdfc0", "#cfe8cd", "#e2f0da"];
-  scents.push({
-    name: `Device ${scents.length + 1}`,
-    color: colors[scents.length % colors.length],
-    deviceId: "",
-    outlet: 0,
-    pulseMs: 3000,
-  });
+  for (let outlet = 0; outlet < 4; outlet += 1) {
+    scents.push({
+      name: `Scent ${outlet + 1}`,
+      color: colors[outlet],
+      deviceId,
+      outlet,
+      pulseMs: 3000,
+    });
+  }
+  deviceIdInput.value = "";
   renderScentSettings(scents);
+  toast("Added four scent channels");
 });
 
 document.getElementById("scentSettingsList").addEventListener("click", async (event) => {

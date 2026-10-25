@@ -75,17 +75,23 @@
 
           <div class="card">
             <h3>How to add your device</h3>
-            <p class="micro-hint">1. In the eWeLink app, open your device and choose Share, then share it to the ASCENT account.</p>
-            <p class="micro-hint">2. Wait for the admin to accept the share.</p>
-            <p class="micro-hint">3. Add your device ID below and press Save devices.</p>
+            <p class="micro-hint">1. Download the eWeLink app and log in.</p>
+            <p class="micro-hint">2. Add your device to the app.</p>
+            <p class="micro-hint">3. Open Device settings and scroll down to find your device ID.</p>
+            <p class="micro-hint">4. Enter your device ID in this website and click "Add devices".</p>
           </div>
 
           <div class="card">
             <h3>Devices</h3>
-            <p class="micro-hint">Add one entry for each known device ID. No devices are preconfigured.</p>
-            <div id="scentSettingsList" class="scent-settings-list"></div>
+            <p class="micro-hint">Add a device ID to create four scent channels, one for each outlet. No devices are preconfigured.</p>
+            <label>Device ID
+              <input type="text" id="newDeviceId" placeholder="Enter your device ID" />
+            </label>
             <div class="row-actions">
               <button type="button" id="addScentBtn" class="secondary-btn">Add device</button>
+            </div>
+            <div id="scentSettingsList" class="scent-settings-list"></div>
+            <div class="row-actions">
               <button type="button" id="saveSettingsBtn" class="primary-btn">Save devices</button>
             </div>
           </div>
